@@ -71,6 +71,28 @@ const metadataFieldMap: Record<string, GraphQLField<any, any>> = {
   __type: TypeMetaFieldDef,
 };
 
+function fieldKey(field: FieldNode): string {
+  if (field.kind === 'Field') {
+    let val = '';
+    if (field.name) {
+      val += `${field.name.value}+`;
+    }
+    if (field.selectionSet) {
+      val += field.selectionSet.selections.map(fieldKey).join('_');
+    }
+    return val;
+  }
+  if (field.kind === 'InlineFragment') {
+    return field.selectionSet.selections.map(fieldKey).join('_');
+  }
+  if (field.kind === 'FragmentSpread') {
+    return field.name.value;
+  }
+  throw new Error(`Not implemented: ${field.kind}`);
+}
+
+const selectionSetCache: { [key in string]?: string } = {};
+
 export class SelectionSetToObject<Config extends ParsedDocumentsConfig = ParsedDocumentsConfig> {
   protected _primitiveFields: PrimitiveField[] = [];
   protected _primitiveAliasedFields: PrimitiveAliasedFields[] = [];
@@ -488,7 +510,7 @@ export class SelectionSetToObject<Config extends ParsedDocumentsConfig = ParsedD
     parentSchemaType: GraphQLObjectType,
     selectionNodes: Array<SelectionNode | FragmentSpreadUsage | DirectiveNode>,
     options?: { unsetTypes: boolean }
-  ) {
+  ): { typeInfo: { name: string; type: string }; fields: string[] } {
     const primitiveFields = new Map<string, FieldNode>();
     const primitiveAliasFields = new Map<string, FieldNode>();
     const linkFieldSelectionSets = new Map<
@@ -590,17 +612,24 @@ export class SelectionSetToObject<Config extends ParsedDocumentsConfig = ParsedD
     const linkFields: LinkField[] = [];
     for (const { field, selectedFieldType } of linkFieldSelectionSets.values()) {
       const realSelectedFieldType = getBaseType(selectedFieldType as any);
-      const selectionSet = this.createNext(realSelectedFieldType, field.selectionSet);
+
+      const cacheKey = `${realSelectedFieldType.name}_${fieldKey(field)}`;
+      let cached = selectionSetCache[cacheKey];
+      if (cached === undefined) {
+        const selectionSet = this.createNext(realSelectedFieldType, field.selectionSet);
+        cached = selectionSet.transformSelectionSet().split(`\n`).join(`\n  `);
+        selectionSetCache[cacheKey] = cached;
+      } else {
+        // Consume cached value
+      }
+
       const isConditional = hasConditionalDirectives(field) || inlineFragmentConditional;
       const isOptional = options?.unsetTypes;
       linkFields.push({
         alias: field.alias ? this._processor.config.formatNamedField(field.alias.value, selectedFieldType) : undefined,
         name: this._processor.config.formatNamedField(field.name.value, selectedFieldType, isConditional, isOptional),
         type: realSelectedFieldType.name,
-        selectionSet: this._processor.config.wrapTypeWithModifiers(
-          selectionSet.transformSelectionSet().split(`\n`).join(`\n  `),
-          selectedFieldType
-        ),
+        selectionSet: this._processor.config.wrapTypeWithModifiers(cached, selectedFieldType),
       });
     }
 
